@@ -1,6 +1,6 @@
 {
-  "name": "claudian",
-  "version": "2.0.11",
+  "name": "claudian-qmd",
+  "version": "2.0.11-qmd.1",
   "description": "Claudian - Claude Code embedded in Obsidian sidebar",
   "main": "main.js",
   "scripts": {
