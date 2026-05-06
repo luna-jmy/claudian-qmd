@@ -2,7 +2,9 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 import {
+  buildSystemPrompt,
   computeSystemPromptKey,
+  type SystemPromptBuildOptions,
   type SystemPromptSettings,
 } from '../../../core/prompt/mainAgent';
 import { getRuntimeEnvironmentText } from '../../../core/providers/providerEnvironment';
@@ -35,6 +37,7 @@ import type {
   StreamChunk,
   ToolCallInfo,
 } from '../../../core/types';
+import { buildQmdAgentInstructions } from '../../../features/qmd/QmdKnowledgeBase';
 import type ClaudianPlugin from '../../../main';
 import { getEnhancedPath } from '../../../utils/env';
 import { getVaultPath } from '../../../utils/path';
@@ -231,11 +234,16 @@ export class OpencodeChatRuntime implements ChatRuntime {
     const runtimeEnv = this.buildRuntimeEnv(
       resolvedCliPath,
       this.currentDatabasePath,
+      cwd,
     );
     const promptSettings = this.getSystemPromptSettings(cwd);
+    const promptOptions = this.getSystemPromptOptions(cwd);
+    const promptKey = computeSystemPromptKey(promptSettings, promptOptions);
     const artifacts = await prepareOpencodeLaunchArtifacts({
       runtimeEnv,
       settings: promptSettings,
+      systemPromptKey: promptKey,
+      systemPromptText: buildSystemPrompt(promptSettings, promptOptions),
       workspaceRoot: cwd,
     });
     this.currentDatabasePath = artifacts.databasePath;
@@ -244,7 +252,7 @@ export class OpencodeChatRuntime implements ChatRuntime {
       command: resolvedCliPath,
       configPath: artifacts.configPath,
       envText: getRuntimeEnvironmentText(this.plugin.settings as unknown as Record<string, unknown>, 'opencode'),
-      promptKey: computeSystemPromptKey(promptSettings),
+      promptKey,
       artifactKey: artifacts.launchKey,
     });
 
@@ -623,14 +631,24 @@ export class OpencodeChatRuntime implements ChatRuntime {
     };
   }
 
+  private getSystemPromptOptions(vaultPath: string): SystemPromptBuildOptions {
+    return {
+      appendices: [
+        buildQmdAgentInstructions(this.plugin.settings, vaultPath),
+      ],
+    };
+  }
+
   private buildRuntimeEnv(
     cliPath: string,
     databasePathOverride?: string | null,
+    vaultPath?: string | null,
   ): NodeJS.ProcessEnv {
     return buildOpencodeRuntimeEnv(
       this.plugin.settings as unknown as Record<string, unknown>,
       cliPath,
       databasePathOverride,
+      vaultPath,
     );
   }
 

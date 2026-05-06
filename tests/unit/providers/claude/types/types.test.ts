@@ -78,6 +78,7 @@ describe('types.ts', () => {
         sharedEnvironmentVariables: '',
         envSnippets: [],
         customContextLimits: {},
+        qmdKnowledgeBase: DEFAULT_SETTINGS.qmdKnowledgeBase,
         systemPrompt: '',
 
         persistentExternalContextPaths: [],
@@ -130,6 +131,7 @@ describe('types.ts', () => {
         sharedEnvironmentVariables: 'API_KEY=test',
         envSnippets: [],
         customContextLimits: {},
+        qmdKnowledgeBase: DEFAULT_SETTINGS.qmdKnowledgeBase,
         systemPrompt: '',
 
         persistentExternalContextPaths: [],
@@ -183,6 +185,7 @@ describe('types.ts', () => {
         sharedEnvironmentVariables: '',
         envSnippets: [],
         customContextLimits: {},
+        qmdKnowledgeBase: DEFAULT_SETTINGS.qmdKnowledgeBase,
         systemPrompt: '',
 
         persistentExternalContextPaths: [],

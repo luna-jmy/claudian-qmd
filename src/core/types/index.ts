@@ -24,6 +24,9 @@ export {
   type InstructionRefineResult,
   type KeyboardNavigationSettings,
   type PermissionMode,
+  type QmdEmbeddingBackend,
+  type QmdKnowledgeBaseSettings,
+  type QmdMcpTransport,
   type SlashCommand,
   type TabBarPosition,
 } from './settings';

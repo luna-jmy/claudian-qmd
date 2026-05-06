@@ -13,6 +13,7 @@ import type { SharedAppStorage } from './core/bootstrap/storage';
 import {
   getEnvironmentVariablesForScope as getScopedEnvironmentVariables,
   getRuntimeEnvironmentText,
+  joinEnvironmentTexts,
   setEnvironmentVariablesForScope,
 } from './core/providers/providerEnvironment';
 import { ProviderRegistry } from './core/providers/ProviderRegistry';
@@ -32,9 +33,15 @@ import {
 import type { ChatViewPlacement, EnvironmentScope } from './core/types/settings';
 import { ClaudianView } from './features/chat/ClaudianView';
 import { type InlineEditContext, InlineEditModal } from './features/inline-edit/ui/InlineEditModal';
+import {
+  buildQmdEnvironmentText,
+  QmdKnowledgeBaseService,
+  upsertQmdMcpServer,
+} from './features/qmd/QmdKnowledgeBase';
 import { ClaudianSettingTab } from './features/settings/ClaudianSettings';
 import { setLocale } from './i18n/i18n';
 import type { Locale } from './i18n/types';
+import { maybeGetClaudeWorkspaceServices } from './providers/claude/app/ClaudeWorkspaceServices';
 import { OPENCODE_PLAN_MODE_ID, OPENCODE_SAFE_MODE_ID } from './providers/opencode/modes';
 import { buildCursorContext } from './utils/editor';
 import { getVaultPath } from './utils/path';
@@ -150,6 +157,64 @@ export default class ClaudianPlugin extends Plugin {
           tabManager.createNewConversation();
         }
         return true;
+      },
+    });
+
+    this.addCommand({
+      id: 'qmd-prepare-knowledge-base',
+      name: 'QMD: prepare knowledge base storage',
+      callback: async () => {
+        await this.prepareQmdKnowledgeBase();
+      },
+    });
+
+    this.addCommand({
+      id: 'qmd-status',
+      name: 'QMD: show status',
+      callback: async () => {
+        await this.runQmdCommand('QMD status', ['status'], 60_000);
+      },
+    });
+
+    this.addCommand({
+      id: 'qmd-add-vault-collection',
+      name: 'QMD: add vault collection',
+      callback: async () => {
+        const vaultPath = getVaultPath(this.app);
+        if (!vaultPath) {
+          new Notice('QMD requires a local Obsidian vault path.');
+          return;
+        }
+        const qmd = this.settings.qmdKnowledgeBase;
+        await this.runQmdCommand(
+          'QMD add collection',
+          [
+            'collection',
+            'add',
+            vaultPath,
+            '--name',
+            qmd.collectionName.trim() || 'vault',
+            '--mask',
+            qmd.collectionPattern.trim() || '**/*.md',
+          ],
+          5 * 60_000,
+        );
+      },
+    });
+
+    this.addCommand({
+      id: 'qmd-update',
+      name: 'QMD: update index',
+      callback: async () => {
+        await this.runQmdCommand('QMD update', ['update'], 10 * 60_000);
+      },
+    });
+
+    this.addCommand({
+      id: 'qmd-embed',
+      name: 'QMD: generate embeddings',
+      callback: async () => {
+        await this.runQmdCommand('QMD embed', ['embed'], 30 * 60_000);
       },
     });
 
@@ -276,6 +341,16 @@ export default class ClaudianPlugin extends Plugin {
       ...DEFAULT_CLAUDIAN_SETTINGS,
       ...claudian,
     } as ClaudianSettings;
+    this.settings.qmdKnowledgeBase = {
+      ...DEFAULT_CLAUDIAN_SETTINGS.qmdKnowledgeBase,
+      ...(
+        this.settings.qmdKnowledgeBase
+        && typeof this.settings.qmdKnowledgeBase === 'object'
+        && !Array.isArray(this.settings.qmdKnowledgeBase)
+          ? this.settings.qmdKnowledgeBase
+          : {}
+      ),
+    };
 
     // Plan mode is ephemeral — normalize back to normal on load so the app
     // doesn't start stuck in plan mode after a restart (prePlanPermissionMode is lost)
@@ -509,9 +584,12 @@ export default class ClaudianPlugin extends Plugin {
       this.settings as unknown as Record<string, unknown>,
     ),
   ): string {
-    return getRuntimeEnvironmentText(
-      this.settings as unknown as Record<string, unknown>,
-      providerId,
+    return joinEnvironmentTexts(
+      getRuntimeEnvironmentText(
+        this.settings as unknown as Record<string, unknown>,
+        providerId,
+      ),
+      buildQmdEnvironmentText(this.settings, getVaultPath(this.app)),
     );
   }
 
@@ -561,6 +639,125 @@ export default class ClaudianPlugin extends Plugin {
     }
 
     return Array.from(affectedProviderIds);
+  }
+
+  private getQmdService(): QmdKnowledgeBaseService {
+    return new QmdKnowledgeBaseService(
+      this.settings.qmdKnowledgeBase,
+      getVaultPath(this.app),
+    );
+  }
+
+  async prepareQmdKnowledgeBase(): Promise<void> {
+    if (!this.settings.qmdKnowledgeBase.enabled) {
+      this.settings.qmdKnowledgeBase.enabled = true;
+      await this.saveSettings();
+    }
+
+    try {
+      const result = this.getQmdService().prepareStorage();
+      await this.configureQmdMcpServer();
+      await this.refreshKnowledgeBaseRuntimeEnvironment();
+      const linkSummary = result.linkMessages.length > 0
+        ? ` Links: ${result.linkMessages.length}.`
+        : '';
+      new Notice(`QMD knowledge base prepared.${linkSummary}`);
+    } catch (error) {
+      new Notice(`QMD prepare failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
+  private async configureQmdMcpServer(): Promise<void> {
+    const qmdSettings = this.settings.qmdKnowledgeBase;
+    const vaultPath = getVaultPath(this.app);
+    if (!qmdSettings.enabled || !qmdSettings.configureClaudeMcp || !vaultPath) {
+      return;
+    }
+
+    const claudeWorkspace = maybeGetClaudeWorkspaceServices();
+    if (!claudeWorkspace) {
+      return;
+    }
+
+    await upsertQmdMcpServer(claudeWorkspace.mcpStorage, qmdSettings, vaultPath);
+    await claudeWorkspace.mcpManager.loadServers();
+
+    for (const view of this.getAllViews()) {
+      await view.getTabManager()?.broadcastToAllTabs(
+        (service) => service.reloadMcpServers(),
+      );
+    }
+  }
+
+  private summarizeQmdResult(label: string, result: Awaited<ReturnType<QmdKnowledgeBaseService['run']>>): string {
+    if (result.timedOut) {
+      return `${label} timed out.`;
+    }
+    if (result.exitCode === 0) {
+      const firstLine = (result.stdout || result.stderr).split(/\r?\n/).find(line => line.trim());
+      return firstLine ? `${label}: ${firstLine}` : `${label} finished.`;
+    }
+    const errorLine = (result.stderr || result.stdout).split(/\r?\n/).find(line => line.trim());
+    return errorLine
+      ? `${label} failed (${result.exitCode}): ${errorLine}`
+      : `${label} failed with exit code ${result.exitCode}.`;
+  }
+
+  private async runQmdCommand(label: string, args: string[], timeoutMs: number): Promise<void> {
+    try {
+      const result = await this.getQmdService().run(args, { timeoutMs });
+      new Notice(this.summarizeQmdResult(label, result), 12_000);
+    } catch (error) {
+      new Notice(`${label} failed: ${error instanceof Error ? error.message : String(error)}`, 12_000);
+    }
+  }
+
+  async refreshKnowledgeBaseRuntimeEnvironment(): Promise<void> {
+    const allViews = this.getAllViews();
+    let failedTabs = 0;
+
+    for (const view of allViews) {
+      const tabManager = view.getTabManager();
+      if (!tabManager) {
+        continue;
+      }
+
+      for (const tab of tabManager.getAllTabs()) {
+        if (tab.state.isStreaming) {
+          tab.controllers.inputController?.cancelStreaming();
+        }
+
+        if (!tab.service || !tab.serviceInitialized) {
+          continue;
+        }
+
+        try {
+          const conversation = tab.conversationId
+            ? this.getConversationSync(tab.conversationId)
+            : null;
+          const hasConversationContext = (conversation?.messages.length ?? 0) > 0;
+          const externalContextPaths = tab.ui.externalContextSelector?.getExternalContexts()
+            ?? (hasConversationContext
+              ? conversation?.externalContextPaths ?? []
+              : this.settings.persistentExternalContextPaths ?? []);
+
+          tab.service.syncConversationState(conversation, externalContextPaths);
+          tab.service.resetSession();
+          await tab.service.ensureReady({ force: true });
+        } catch {
+          failedTabs++;
+        }
+      }
+    }
+
+    for (const view of allViews) {
+      view.invalidateProviderCommandCaches(ProviderRegistry.getRegisteredProviderIds());
+      view.refreshModelSelector();
+    }
+
+    if (failedTabs > 0) {
+      new Notice(`QMD settings saved, but ${failedTabs} tab(s) failed to restart.`);
+    }
   }
 
   private generateConversationId(): string {

@@ -81,6 +81,38 @@ export type EnvironmentScope = 'shared' | `provider:${string}`;
 /** Hostname-keyed CLI paths for per-device configuration. */
 export type HostnameCliPaths = Record<string, string>;
 
+export type QmdEmbeddingBackend = 'local' | 'api';
+export type QmdMcpTransport = 'stdio' | 'http';
+
+/** QMD knowledge-base integration settings. */
+export interface QmdKnowledgeBaseSettings {
+  enabled: boolean;
+  qmdCommand: string;
+  storeDir: string;
+  indexName: string;
+  collectionName: string;
+  collectionPattern: string;
+  collectionIgnore: string;
+  collectionContext: string;
+  globalContext: string;
+  embeddingBackend: QmdEmbeddingBackend;
+  localEmbedModel: string;
+  apiProvider: string;
+  apiBaseUrl: string;
+  apiKey: string;
+  apiKeyEnvVar: string;
+  apiModel: string;
+  apiDimensions: string;
+  configureClaudeMcp: boolean;
+  mcpTransport: QmdMcpTransport;
+  mcpHttpUrl: string;
+  createDefaultLinks: boolean;
+  defaultCacheDir: string;
+  defaultConfigDir: string;
+  legacyCacheDir: string;
+  legacyConfigDir: string;
+}
+
 /** Opaque provider-owned settings bags keyed by provider id. */
 export type ProviderConfigMap = Partial<Record<string, Record<string, unknown>>>;
 
@@ -116,6 +148,7 @@ export interface ClaudianSettings {
   sharedEnvironmentVariables: string;
   envSnippets: EnvSnippet[];
   customContextLimits: Record<string, number>;
+  qmdKnowledgeBase: QmdKnowledgeBaseSettings;
 
   // UI settings
   keyboardNavigation: KeyboardNavigationSettings;

@@ -12,6 +12,7 @@ import {
 } from '../../../core/prompt/mainAgent';
 import type { AppPluginManager } from '../../../core/providers/types';
 import type { ClaudianSettings, PermissionMode } from '../../../core/types/settings';
+import { buildQmdAgentInstructions } from '../../../features/qmd/QmdKnowledgeBase';
 import {
   type ClaudeSafeMode,
   getClaudeProviderSettings,
@@ -102,6 +103,9 @@ export class QueryOptionsBuilder {
       vaultPath: ctx.vaultPath,
       userName: ctx.settings.userName,
     };
+    const systemPromptOptions = {
+      appendices: [buildQmdAgentInstructions(ctx.settings, ctx.vaultPath)],
+    };
 
     const sdkPermissionMode = QueryOptionsBuilder.resolveClaudeSdkPermissionMode(
       ctx.settings.permissionMode,
@@ -119,7 +123,7 @@ export class QueryOptionsBuilder {
       effortLevel: resolveAdaptiveEffortLevel(ctx.settings.model, ctx.settings.effortLevel),
       permissionMode: ctx.settings.permissionMode,
       sdkPermissionMode,
-      systemPromptKey: computeSystemPromptKey(systemPromptSettings),
+      systemPromptKey: computeSystemPromptKey(systemPromptSettings, systemPromptOptions),
       disallowedToolsKey,
       mcpServersKey: '', // Dynamic via setMcpServers, not tracked for restart
       pluginsKey,
@@ -272,9 +276,12 @@ export class QueryOptionsBuilder {
       vaultPath: ctx.vaultPath,
       userName: ctx.settings.userName,
     };
+    const systemPromptOptions = {
+      appendices: [buildQmdAgentInstructions(ctx.settings, ctx.vaultPath)],
+    };
     const options: Options = {
       cwd: ctx.vaultPath,
-      systemPrompt: buildSystemPrompt(systemPromptSettings),
+      systemPrompt: buildSystemPrompt(systemPromptSettings, systemPromptOptions),
       model,
       abortController,
       pathToClaudeCodeExecutable: ctx.cliPath,

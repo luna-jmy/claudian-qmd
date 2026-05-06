@@ -5,6 +5,7 @@ import * as path from 'path';
 import {
   buildSystemPrompt,
   computeSystemPromptKey,
+  type SystemPromptBuildOptions,
   type SystemPromptSettings,
 } from '../../../core/prompt/mainAgent';
 import { ProviderSettingsCoordinator } from '../../../core/providers/ProviderSettingsCoordinator';
@@ -26,6 +27,7 @@ import type {
   SubagentRuntimeState,
 } from '../../../core/runtime/types';
 import type { ChatMessage, Conversation, ForkSource, SlashCommand, StreamChunk } from '../../../core/types';
+import { buildQmdAgentInstructions } from '../../../features/qmd/QmdKnowledgeBase';
 import type ClaudianPlugin from '../../../main';
 import { getVaultPath } from '../../../utils/path';
 import { buildContextFromHistory } from '../../../utils/session';
@@ -215,7 +217,8 @@ export class CodexChatRuntime implements ChatRuntime {
 
   async ensureReady(options?: ChatRuntimeEnsureReadyOptions): Promise<boolean> {
     const promptSettings = this.getSystemPromptSettings();
-    const promptKey = computeSystemPromptKey(promptSettings);
+    const promptOptions = this.getSystemPromptOptions();
+    const promptKey = computeSystemPromptKey(promptSettings, promptOptions);
     const launchSpec = resolveCodexAppServerLaunchSpec(this.plugin, this.providerId);
     const clientConfigKey = [promptKey, JSON.stringify({
       command: launchSpec.command,
@@ -262,7 +265,7 @@ export class CodexChatRuntime implements ChatRuntime {
 
     const model = this.resolveModel(queryOptions);
     const promptSettings = this.getSystemPromptSettings();
-    const promptText = buildSystemPrompt(promptSettings);
+    const promptText = buildSystemPrompt(promptSettings, this.getSystemPromptOptions());
 
     const enqueueChunk = (chunk: StreamChunk): void => {
       this.chunkBuffer.push(chunk);
@@ -904,6 +907,17 @@ export class CodexChatRuntime implements ChatRuntime {
       customPrompt: settings.systemPrompt,
       vaultPath: getVaultPath(this.plugin.app) ?? undefined,
       userName: settings.userName,
+    };
+  }
+
+  private getSystemPromptOptions(): SystemPromptBuildOptions {
+    return {
+      appendices: [
+        buildQmdAgentInstructions(
+          this.plugin.settings,
+          getVaultPath(this.plugin.app),
+        ),
+      ],
     };
   }
 

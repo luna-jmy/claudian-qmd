@@ -13,6 +13,8 @@ import { getAvailableLocales, getLocaleDisplayName, setLocale, t } from '../../i
 import type { Locale, TranslationKey } from '../../i18n/types';
 import type ClaudianPlugin from '../../main';
 import { formatContextLimit, parseContextLimit, parseEnvironmentVariables } from '../../utils/env';
+import { getVaultPath } from '../../utils/path';
+import { buildQmdEnvironmentText } from '../qmd/QmdKnowledgeBase';
 import { buildNavMappingText, parseNavMappings } from './keyboardNavigation';
 import { renderEnvironmentSettingsSection } from './ui/EnvironmentSettingsSection';
 
@@ -451,6 +453,10 @@ export class ClaudianSettingTab extends PluginSettingTab {
     addHotkeySettingRow(hotkeyGrid, this.app, 'claudian:new-tab', 'settings.newTabHotkey');
     addHotkeySettingRow(hotkeyGrid, this.app, 'claudian:close-current-tab', 'settings.closeTabHotkey');
 
+    // --- QMD Knowledge Base ---
+
+    this.renderQmdSettings(container);
+
     // --- Environment ---
 
     renderEnvironmentSettingsSection({
@@ -463,6 +469,332 @@ export class ClaudianSettingTab extends PluginSettingTab {
       placeholder: 'PATH=/opt/homebrew/bin:/usr/local/bin\nHTTPS_PROXY=http://proxy.example.com:8080\nSSL_CERT_FILE=/path/to/cert.pem',
       renderCustomContextLimits: (target) => this.renderCustomContextLimits(target),
     });
+  }
+
+  private renderQmdSettings(container: HTMLElement): void {
+    const qmd = this.plugin.settings.qmdKnowledgeBase;
+    const saveQmdSettings = async (refresh = false): Promise<void> => {
+      await this.plugin.saveSettings();
+      if (refresh) {
+        await this.plugin.refreshKnowledgeBaseRuntimeEnvironment();
+      }
+    };
+    const scheduleRuntimeRefresh = (): void => {
+      void this.plugin.refreshKnowledgeBaseRuntimeEnvironment();
+    };
+    const addTextSetting = (
+      name: string,
+      desc: string,
+      value: string,
+      placeholder: string,
+      onValue: (value: string) => void,
+      options: { rows?: number; password?: boolean; refreshOnBlur?: boolean } = {},
+    ): void => {
+      const setting = new Setting(container)
+        .setName(name)
+        .setDesc(desc);
+
+      if (options.rows && options.rows > 1) {
+        setting.addTextArea((text) => {
+          text
+            .setPlaceholder(placeholder)
+            .setValue(value)
+            .onChange(async (nextValue) => {
+              onValue(nextValue);
+              await saveQmdSettings(false);
+            });
+          text.inputEl.rows = options.rows ?? 4;
+          text.inputEl.cols = 50;
+          if (options.refreshOnBlur) {
+            text.inputEl.addEventListener('blur', scheduleRuntimeRefresh);
+          }
+        });
+        return;
+      }
+
+      setting.addText((text) => {
+        text
+          .setPlaceholder(placeholder)
+          .setValue(value)
+          .onChange(async (nextValue) => {
+            onValue(nextValue);
+            await saveQmdSettings(false);
+          });
+        text.inputEl.style.width = '100%';
+        if (options.password) {
+          text.inputEl.type = 'password';
+        }
+        if (options.refreshOnBlur) {
+          text.inputEl.addEventListener('blur', scheduleRuntimeRefresh);
+        }
+      });
+    };
+
+    new Setting(container).setName('Knowledge Base (QMD)').setHeading();
+
+    new Setting(container)
+      .setName('Enable QMD knowledge base')
+      .setDesc('Generate vault-scoped QMD environment variables and agent instructions.')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(qmd.enabled)
+          .onChange(async (value) => {
+            qmd.enabled = value;
+            await saveQmdSettings(true);
+            this.display();
+          })
+      );
+
+    addTextSetting(
+      'QMD command',
+      'Command or executable used to run qmd.',
+      qmd.qmdCommand,
+      'qmd',
+      (value) => { qmd.qmdCommand = value.trim() || 'qmd'; },
+      { refreshOnBlur: true },
+    );
+
+    addTextSetting(
+      'Vault QMD folder',
+      'Relative paths are resolved from the vault root. Only config and database files are written here; GGUF models stay in the global QMD cache.',
+      qmd.storeDir,
+      'QMD',
+      (value) => { qmd.storeDir = value.trim() || 'QMD'; },
+      { refreshOnBlur: true },
+    );
+
+    addTextSetting(
+      'Index name',
+      'QMD index name. The database becomes <index>.sqlite.',
+      qmd.indexName,
+      'index',
+      (value) => { qmd.indexName = value.trim() || 'index'; },
+      { refreshOnBlur: true },
+    );
+
+    addTextSetting(
+      'Collection name',
+      'Collection name used by qmd query -c.',
+      qmd.collectionName,
+      'vault',
+      (value) => { qmd.collectionName = value.trim() || 'vault'; },
+      { refreshOnBlur: true },
+    );
+
+    addTextSetting(
+      'Collection pattern',
+      'Glob pattern for files that should be indexed.',
+      qmd.collectionPattern,
+      '**/*.md',
+      (value) => { qmd.collectionPattern = value.trim() || '**/*.md'; },
+    );
+
+    addTextSetting(
+      'Ignore patterns',
+      'One glob per line. Keep QMD and agent metadata out of the index unless you intentionally want them searchable.',
+      qmd.collectionIgnore,
+      '.obsidian/**\nQMD/**\n.claudian/**',
+      (value) => { qmd.collectionIgnore = value; },
+      { rows: 5 },
+    );
+
+    addTextSetting(
+      'Collection context',
+      'Context attached to qmd://<collection>/ results.',
+      qmd.collectionContext,
+      'Obsidian vault notes and knowledge base.',
+      (value) => { qmd.collectionContext = value; },
+      { rows: 3 },
+    );
+
+    addTextSetting(
+      'Global context',
+      'Optional context applied to all QMD collections in this config.',
+      qmd.globalContext,
+      'Long-term personal knowledge base.',
+      (value) => { qmd.globalContext = value; },
+      { rows: 3 },
+    );
+
+    new Setting(container)
+      .setName('Embedding backend')
+      .setDesc('Local uses QMD GGUF models. API emits OpenAI-compatible QMD_* embedding variables for a patched or compatible qmd build.')
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption('local', 'Local GGUF')
+          .addOption('api', 'API')
+          .setValue(qmd.embeddingBackend)
+          .onChange(async (value) => {
+            qmd.embeddingBackend = value === 'api' ? 'api' : 'local';
+            await saveQmdSettings(true);
+            this.display();
+          });
+      });
+
+    if (qmd.embeddingBackend === 'local') {
+      addTextSetting(
+        'Local embedding model',
+        'Optional QMD_EMBED_MODEL override. Leave empty to use qmd default.',
+        qmd.localEmbedModel,
+        'hf:Qwen/Qwen3-Embedding-0.6B-GGUF/Qwen3-Embedding-0.6B-Q8_0.gguf',
+        (value) => { qmd.localEmbedModel = value.trim(); },
+        { refreshOnBlur: true },
+      );
+    } else {
+      addTextSetting(
+        'API provider',
+        'Provider label written to QMD_EMBED_PROVIDER.',
+        qmd.apiProvider,
+        'openai',
+        (value) => { qmd.apiProvider = value.trim() || 'openai'; },
+        { refreshOnBlur: true },
+      );
+      addTextSetting(
+        'API base URL',
+        'OpenAI-compatible embeddings endpoint base URL.',
+        qmd.apiBaseUrl,
+        'https://api.openai.com/v1',
+        (value) => { qmd.apiBaseUrl = value.trim(); },
+        { refreshOnBlur: true },
+      );
+      addTextSetting(
+        'API model',
+        'Embedding model name written to QMD_EMBED_MODEL.',
+        qmd.apiModel,
+        'text-embedding-3-small',
+        (value) => { qmd.apiModel = value.trim(); },
+        { refreshOnBlur: true },
+      );
+      addTextSetting(
+        'API dimensions',
+        'Optional vector dimension count, if your qmd build/provider requires it.',
+        qmd.apiDimensions,
+        '1536',
+        (value) => { qmd.apiDimensions = value.trim(); },
+        { refreshOnBlur: true },
+      );
+      addTextSetting(
+        'API key env var',
+        'Name of the generated environment variable that receives the API key.',
+        qmd.apiKeyEnvVar,
+        'QMD_EMBED_API_KEY',
+        (value) => { qmd.apiKeyEnvVar = value.trim() || 'QMD_EMBED_API_KEY'; },
+        { refreshOnBlur: true },
+      );
+      addTextSetting(
+        'API key',
+        'Optional. Stored in plugin settings, which may sync with the vault.',
+        qmd.apiKey,
+        'sk-...',
+        (value) => { qmd.apiKey = value.trim(); },
+        { password: true, refreshOnBlur: true },
+      );
+    }
+
+    new Setting(container)
+      .setName('Configure Claude MCP')
+      .setDesc('Adds or updates a qmd MCP server in .claude/mcp.json for Claude sessions.')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(qmd.configureClaudeMcp)
+          .onChange(async (value) => {
+            qmd.configureClaudeMcp = value;
+            await saveQmdSettings(false);
+          })
+      );
+
+    new Setting(container)
+      .setName('MCP transport')
+      .setDesc('stdio launches qmd per client. http expects qmd mcp --http to be running.')
+      .addDropdown((dropdown) => {
+        dropdown
+          .addOption('stdio', 'stdio')
+          .addOption('http', 'http')
+          .setValue(qmd.mcpTransport)
+          .onChange(async (value) => {
+            qmd.mcpTransport = value === 'http' ? 'http' : 'stdio';
+            await saveQmdSettings(false);
+            this.display();
+          });
+      });
+
+    if (qmd.mcpTransport === 'http') {
+      addTextSetting(
+        'QMD MCP URL',
+        'Streamable HTTP MCP endpoint.',
+        qmd.mcpHttpUrl,
+        'http://localhost:8181/mcp',
+        (value) => { qmd.mcpHttpUrl = value.trim() || 'http://localhost:8181/mcp'; },
+      );
+    }
+
+    new Setting(container)
+      .setName('Create links for global qmd')
+      .setDesc('Best-effort symlinks from default qmd config/cache files to the vault QMD files. Useful for terminal qmd without generated env vars.')
+      .addToggle((toggle) =>
+        toggle
+          .setValue(qmd.createDefaultLinks)
+          .onChange(async (value) => {
+            qmd.createDefaultLinks = value;
+            await saveQmdSettings(false);
+          })
+      );
+
+    addTextSetting(
+      'Default qmd cache dir',
+      'Optional override for the default qmd cache folder that receives index.sqlite links. Leave empty for platform default.',
+      qmd.defaultCacheDir,
+      '~/.cache/qmd',
+      (value) => { qmd.defaultCacheDir = value.trim(); },
+    );
+
+    addTextSetting(
+      'Default qmd config dir',
+      'Optional override for the default qmd config folder that receives index.yml links. Leave empty for platform default.',
+      qmd.defaultConfigDir,
+      '~/.config/qmd',
+      (value) => { qmd.defaultConfigDir = value.trim(); },
+    );
+
+    addTextSetting(
+      'Legacy cache dir',
+      'Optional old cache directory to migrate/link, for example D:\\ThinkDoKit-Luna\\_qmd-cache.',
+      qmd.legacyCacheDir,
+      'D:\\ThinkDoKit-Luna\\_qmd-cache',
+      (value) => { qmd.legacyCacheDir = value.trim(); },
+    );
+
+    addTextSetting(
+      'Legacy config dir',
+      'Optional old config directory to migrate/link, for example D:\\ThinkDoKit-Luna\\_qmd-config.',
+      qmd.legacyConfigDir,
+      'D:\\ThinkDoKit-Luna\\_qmd-config',
+      (value) => { qmd.legacyConfigDir = value.trim(); },
+    );
+
+    new Setting(container)
+      .setName('Prepare QMD')
+      .setDesc('Writes QMD config into the vault folder, creates requested links, and configures Claude MCP.')
+      .addButton((button) => {
+        button
+          .setButtonText('Prepare')
+          .setCta()
+          .onClick(async () => {
+            await this.plugin.prepareQmdKnowledgeBase();
+          });
+      });
+
+    const envPreview = buildQmdEnvironmentText(this.plugin.settings, getVaultPath(this.app));
+    if (envPreview) {
+      addTextSetting(
+        'Generated QMD env',
+        'Read-only preview of variables injected into agent runtimes.',
+        envPreview,
+        '',
+        () => {},
+        { rows: 6 },
+      );
+    }
   }
 
   private renderHiddenProviderCommandSetting(
